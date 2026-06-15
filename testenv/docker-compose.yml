@@ -1,0 +1,220 @@
+# version: "3.8"  # 已过时，移除以消除警告
+networks:
+  scan-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+  # Redis 扫描器自身依赖（独立网络隔离）
+  redis:
+    image: redis:7-alpine        # 多平台镜像，无需指定 platform
+    container_name: lab-redis
+    ports:
+      - "6379:6379"
+    networks:
+      scan-lab:
+       ipv4_address: 172.28.0.2
+
+  
+
+  # Nginx（旧版本，无认证的 status 页面暴露）
+  nginx-vuln:
+    image: nginx:1.14.0          # CVE-2019-9511/9513/9516 HTTP/2
+    platform: linux/amd64        # 旧镜像无 ARM64，Mac M 系列需要模拟
+    container_name: lab-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.10
+
+  # Apache HTTPD（旧版本，Server 头泄露版本号）
+  apache-vuln:
+    image: httpd:2.4.49           # CVE-2021-41773 路径穿越 & RCE（最经典）
+    platform: linux/amd64
+    container_name: lab-apache
+    ports:
+      - "8081:80"
+    volumes:
+      - ./conf/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.11
+
+ 
+
+  # Tomcat（旧版本，Manager 界面弱口令 + 文件上传）
+  tomcat-vuln:
+    image: tomcat:9.0.30-jdk8     # CVE-2020-1938 Ghostcat AJP 文件读取
+    platform: linux/amd64
+    container_name: lab-tomcat
+    ports:
+      - "8082:8080"
+      - "8009:8009"               # AJP 端口（Ghostcat 利用端口）
+    environment:
+      - CATALINA_OPTS=-Dfile.encoding=UTF-8
+    volumes:
+      - ./conf/tomcat-users.xml:/usr/local/tomcat/conf/tomcat-users.xml:ro
+      - ./conf/context.xml:/usr/local/tomcat/webapps/manager/META-INF/context.xml:ro
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.12
+
+  # # WebLogic（经典高危版本）
+  # weblogic-vuln:
+  #   image: ismaleiva90/weblogic12  # WebLogic 12c，存在多个反序列化 CVE
+  #   container_name: lab-weblogic
+  #   ports:
+  #     - "7001:7001"               # HTTP/管理控制台
+  #     - "7002:7002"               # HTTPS
+  #   networks:
+  #     scan-lab:
+  #       ipv4_address: 172.28.0.13
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 2g             
+
+  # Jenkins（旧版本，未认证 RCE）
+  jenkins-vuln:
+    image: jenkins/jenkins:2.235.1-lts  # CVE-2019-1003000 Script Security bypass
+    platform: linux/amd64
+    container_name: lab-jenkins
+    ports:
+      - "8083:8080"
+      - "50000:50000"
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false  # 跳过初始化向导
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.14
+
+
+  # WordPress（旧版本 + 弱口令）
+  wordpress-vuln:
+    image: wordpress:5.0.0        # 多个 XSS/SSRF/RCE CVE
+    platform: linux/amd64
+    container_name: lab-wordpress
+    ports:
+      - "8084:80"
+    environment:
+      WORDPRESS_DB_HOST: mysql-vuln
+      WORDPRESS_DB_USER: root
+      WORDPRESS_DB_PASSWORD: root123
+      WORDPRESS_DB_NAME: wordpress
+    depends_on:
+      - mysql-vuln
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.15
+
+  # phpMyAdmin（旧版本）
+  phpmyadmin-vuln:
+    image: phpmyadmin/phpmyadmin:4.8.0  # CVE-2018-12613 文件包含
+    platform: linux/amd64
+    container_name: lab-phpmyadmin
+    ports:
+      - "8085:80"
+    environment:
+      PMA_HOST: mysql-vuln
+      PMA_USER: root
+      PMA_PASSWORD: root123
+    depends_on:
+      - mysql-vuln
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.16
+
+
+  # MySQL（旧版本，允许远程 root 登录）
+  mysql-vuln:
+    image: mysql:5.7.30
+    platform: linux/amd64
+    container_name: lab-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: wordpress
+    command: >
+      --bind-address=0.0.0.0
+      --skip-name-resolve
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.20
+
+  # Redis（无认证版本，模拟未授权访问）
+  redis-vuln:
+    image: redis:4.0.14           # CVE-2022-0543 Lua 沙箱逃逸
+    platform: linux/amd64
+    container_name: lab-redis-vuln
+    ports:
+      - "6380:6379"               # 注意：用 6380 避免和扫描器 Redis 冲突
+    command: redis-server --protected-mode no  # 关闭保护模式，模拟未授权
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.21
+
+  # MongoDB（无认证）
+  mongo-vuln:
+    image: mongo:4.2.0
+    platform: linux/amd64
+    container_name: lab-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=
+      - MONGO_INITDB_ROOT_PASSWORD=
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.22
+
+  # Elasticsearch（无认证，信息泄露）
+  elastic-vuln:
+    image: elasticsearch:7.6.0
+    platform: linux/amd64
+    container_name: lab-elastic
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false    # 关闭认证
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.23
+
+
+  # Grafana（旧版本，未授权任意文件读取）
+  grafana-vuln:
+    image: grafana/grafana:8.3.0  # CVE-2021-43798 路径穿越任意文件读取
+    platform: linux/amd64
+    container_name: lab-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true   # 匿名访问
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.30
+
+  # Kibana（配合 ES 无认证）
+  kibana-vuln:
+    image: kibana:7.6.0
+    platform: linux/amd64
+    container_name: lab-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://172.28.0.23:9200
+    depends_on:
+      - elastic-vuln
+    networks:
+      scan-lab:
+        ipv4_address: 172.28.0.31

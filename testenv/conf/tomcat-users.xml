@@ -1,0 +1,14 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+  Tomcat Manager 弱口令配置
+  admin:admin / tomcat:tomcat
+  用于测试扫描器对 Tomcat Manager 弱口令的检测能力
+-->
+<tomcat-users>
+  <role rolename="manager-gui"/>
+  <role rolename="manager-script"/>
+  <role rolename="admin-gui"/>
+  <role rolename="admin-script"/>
+  <user username="admin"  password="admin"  roles="manager-gui,manager-script,admin-gui,admin-script"/>
+  <user username="tomcat" password="tomcat" roles="manager-gui"/>
+</tomcat-users>

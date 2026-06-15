@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  关闭 Tomcat Manager 的 IP 限制
+  默认只允许 127.0.0.1 访问，这里改为允许所有 IP（模拟错误配置）
+-->
+<Context antiResourceLocking="false" privileged="true">
+  <Valve className="org.apache.catalina.valves.RemoteAddrValve"
+         allow=".*" />
+</Context>
