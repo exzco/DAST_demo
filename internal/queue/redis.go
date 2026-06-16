@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"distributed-scanner/internal/config"
+	log "distributed-scanner/log"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -16,8 +17,6 @@ type Client struct {
 	rdb *redis.Client
 }
 
-// NewClient 根据 Redis 配置创建客户端并验证连通性。
-// 连接失败时 panic，阻止带错误配置的 Worker 静默启动。
 func NewClient(redisCfg config.RedisConfig) *Client {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:        redisCfg.Addr,
@@ -31,16 +30,14 @@ func NewClient(redisCfg config.RedisConfig) *Client {
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		panic(fmt.Sprintf("[queue] redis connect failed addr=%s err=%v", redisCfg.Addr, err))
 	}
-	fmt.Printf("[queue] redis connected: %s (db=%d)\n", redisCfg.Addr, redisCfg.DB)
+	log.Printf("[queue] redis connected: %s (db=%d)\n", redisCfg.Addr, redisCfg.DB)
 	return &Client{rdb: rdb}
 }
 
-// Push 向队列尾部追加一条 JSON 消息
 func (c *Client) Push(ctx context.Context, key, value string) error {
 	return c.rdb.RPush(ctx, key, value).Err()
 }
 
-// BLPop 阻塞弹出队列头部消息，ctx 取消时返回错误
 func (c *Client) BLPop(ctx context.Context, key string) (string, error) {
 	res, err := c.rdb.BLPop(ctx, 0, key).Result()
 	if err != nil {

@@ -5,50 +5,105 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
+	"unsafe"
+
+	log "distributed-scanner/log"
 
 	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/disk"
+	"github.com/projectdiscovery/nuclei/v3/pkg/input/provider"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 )
 
+var (
+	// engineCache 用于缓存加载好特定 tags 模板的 nuclei.NucleiEngine 实例
+	engineCache = make(map[string]*nuclei.NucleiEngine)
+	cacheMu     sync.Mutex
+)
+
+// getCacheKey 将 tags 排序后拼接成唯一的缓存 key
+func getCacheKey(tags []string, pocDir string) string {
+	sorted := make([]string, len(tags))
+	copy(sorted, tags)
+	sort.Strings(sorted)
+	return pocDir + "|" + strings.Join(sorted, ",")
+}
+
+// resetEngineState 使用反射重置 nuclei.NucleiEngine 的输入源 (inputProvider) 与结果回调 (resultCallbacks)，以防在复用时数据累积污染。
+func resetEngineState(e *nuclei.NucleiEngine) {
+	val := reflect.ValueOf(e).Elem()
+
+	// 1. 重置 inputProvider
+	ipField := val.FieldByName("inputProvider")
+	if ipField.IsValid() {
+		ptr := unsafe.Pointer(ipField.UnsafeAddr())
+		*(*provider.InputProvider)(ptr) = provider.NewSimpleInputProvider()
+	}
+
+	// 2. 清空 resultCallbacks
+	rcField := val.FieldByName("resultCallbacks")
+	if rcField.IsValid() {
+		ptr := unsafe.Pointer(rcField.UnsafeAddr())
+		*(*[]func(*output.ResultEvent))(ptr) = nil
+	}
+}
+
 // ScanWithTags 按指纹 tags 动态过滤 nuclei 模板，只执行与目标技术栈相关的 POC
-//
-// 工作原理：
-//   - nuclei 模板 YAML 头中都有 tags 字段，例如 "tags: wordpress,rce"
-//   - WithTemplateFilters 让 nuclei 只加载 tags 匹配的模板
-//   - WordPress 站只跑 wordpress 相关模板（几十个），而非全量（数千个）
-//   - 速度差异：10-100 倍
-//
-// pocDir: poc 模板目录路径，通常为 "../engines/dast-engine/poc" 的软链
 func ScanWithTags(ctx context.Context, target string, tags []string, pocDir string) ([]*output.ResultEvent, error) {
-	fmt.Printf("[poc] scanning target=%s tags=%v\n", target, tags)
+	log.Printf("[poc] scanning target=%s tags=%v\n", target, tags)
 
 	if len(tags) == 0 {
 		tags = []string{"exposure", "misconfig", "config"}
 	}
 
-	engine, err := nuclei.NewNucleiEngineCtx(ctx,
-		nuclei.WithCatalog(disk.NewCatalog(pocDir)),
-		nuclei.DisableUpdateCheck(),
-		// 核心：按指纹 tags 过滤模板，动态匹配
-		nuclei.WithTemplateFilters(nuclei.TemplateFilters{
-			Tags: tags,
-		}),
-	)
+	key := getCacheKey(tags, pocDir)
+
+	cacheMu.Lock()
+	engine, exists := engineCache[key]
+	var err error
+	if !exists {
+		// 引擎不存在时才创建并加载模板
+		engine, err = nuclei.NewNucleiEngineCtx(ctx,
+			nuclei.WithCatalog(disk.NewCatalog(pocDir)),
+			nuclei.DisableUpdateCheck(),
+			nuclei.WithTemplateFilters(nuclei.TemplateFilters{
+				Tags: tags,
+			}),
+		)
+		if err == nil {
+			if loadErr := engine.LoadAllTemplates(); loadErr == nil {
+				engineCache[key] = engine
+			} else {
+				engine.Close()
+				err = fmt.Errorf("load templates failed: %w", loadErr)
+			}
+		}
+	}
+	cacheMu.Unlock()
+
 	if err != nil {
-		return nil, fmt.Errorf("[poc] create engine failed: %w", err)
-	}
-	defer engine.Close()
-
-	if err := engine.LoadAllTemplates(); err != nil {
-		return nil, fmt.Errorf("[poc] load templates failed: %w", err)
+		return nil, fmt.Errorf("[poc] create or load engine failed: %w", err)
 	}
 
+	// 必须加锁保护共享引擎的执行（由于 Nuclei Engine 会被多线程的 PocWorker 复用）
+	// 注意：Nuclei Engine 的 LoadTargetsFromReader 在并发调用时，其内部 inputProvider 会冲突，因此必须互斥执行扫描。
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+
+	// 清空当前引擎的 targets 和 callbacks，防止上一次任务的目标残留及回调累积
+	resetEngineState(engine)
+
+	// 重新装载当前任务的 target
 	reader := bufio.NewReader(strings.NewReader(target))
 	engine.LoadTargetsFromReader(reader, false)
 
 	var results []*output.ResultEvent
+
+	// 执行扫描并注入结果收集器
 	err = engine.ExecuteCallbackWithCtx(ctx, func(ev *output.ResultEvent) {
 		if ev == nil || !ev.MatcherStatus {
 			return
@@ -64,6 +119,6 @@ func ScanWithTags(ctx context.Context, target string, tags []string, pocDir stri
 		return results, fmt.Errorf("[poc] execute failed: %w", err)
 	}
 
-	fmt.Printf("[poc] target=%s found %d findings\n", target, len(results))
+	log.Printf("[poc] target=%s found %d findings\n", target, len(results))
 	return results, nil
 }

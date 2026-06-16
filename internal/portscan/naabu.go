@@ -8,15 +8,15 @@ import (
 	"strings"
 
 	"distributed-scanner/internal/config"
+	log "distributed-scanner/log"
 
 	naaburesult "github.com/projectdiscovery/naabu/v2/pkg/result"
 	naaburunner "github.com/projectdiscovery/naabu/v2/pkg/runner"
 )
 
 // ScanIP 对单个 IP 做端口扫描，返回开放的端口号列表。
-// 只接收 PortScanConfig，不依赖整个 Config，遵循最小知识原则。
 func ScanIP(ctx context.Context, ip string, portRange string, scanCfg config.PortScanConfig) ([]int, error) {
-	fmt.Printf("[portscan] scanning ip=%s ports=%s rate=%d threads=%d\n",
+	log.Printf("[portscan] scanning ip=%s ports=%s rate=%d threads=%d\n",
 		ip, portRange, scanCfg.Rate, scanCfg.Threads)
 
 	var openPorts []int
@@ -32,17 +32,23 @@ func ScanIP(ctx context.Context, ip string, portRange string, scanCfg config.Por
 		// 跳过主机发现，直接端口扫描
 		WithHostDiscovery: false,
 		SkipHostDiscovery: true,
-
-		// 结果回调：收集开放端口号
-		OnResult: func(hr *naaburesult.HostResult) {
-			if hr == nil {
-				return
-			}
-			for _, p := range hr.Ports {
-				openPorts = append(openPorts, p.Port)
-			}
-		},
 	}
+
+	if scanCfg.ScanType == "syn" {
+		options.ScanType = "s"
+	} else {
+		options.ScanType = "c"
+	}
+
+	options.OnResult = func(hr *naaburesult.HostResult) {
+		if hr == nil {
+			return
+		}
+		for _, p := range hr.Ports {
+			openPorts = append(openPorts, p.Port)
+		}
+	}
+
 
 	// 根据 portRange 参数决定扫描模式
 	switch portRange {
@@ -70,6 +76,6 @@ func ScanIP(ctx context.Context, ip string, portRange string, scanCfg config.Por
 		return nil, fmt.Errorf("[portscan] enumeration failed ip=%s: %w", ip, err)
 	}
 
-	fmt.Printf("[portscan] ip=%s found %d open ports\n", ip, len(openPorts))
+	log.Printf("[portscan] ip=%s found %d open ports\n", ip, len(openPorts))
 	return openPorts, nil
 }

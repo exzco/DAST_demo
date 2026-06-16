@@ -8,11 +8,13 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	log "distributed-scanner/log"
 )
 
 // ProbeBanner 对 host:port 发送探测字节并读取 Banner
 // 用于识别 Redis / MySQL / MongoDB / SSH 等非 HTTP 服务
-func ProbeBanner(ctx context.Context, host string, port int) []string {
+func ProbeBanner(ctx context.Context, host string, port int) ([]string, error) {
 	hostPort := fmt.Sprintf("%s:%d", host, port)
 
 	dialer := &net.Dialer{}
@@ -21,7 +23,7 @@ func ProbeBanner(ctx context.Context, host string, port int) []string {
 
 	conn, err := dialer.DialContext(connCtx, "tcp", hostPort)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(2 * time.Second))
@@ -29,16 +31,22 @@ func ProbeBanner(ctx context.Context, host string, port int) []string {
 	buf := make([]byte, 256)
 	n, err := conn.Read(buf)
 	if err != nil || n == 0 {
-		conn.Write([]byte("PING\r\n"))
+		_, writeErr := conn.Write([]byte("PING\r\n"))
+		if writeErr != nil {
+			return nil, writeErr
+		}
 		conn.SetDeadline(time.Now().Add(1 * time.Second))
 		n, err = conn.Read(buf)
 		if err != nil || n == 0 {
-			return nil
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("read empty banner")
 		}
 	}
 
 	banner := string(buf[:n])
-	return matchBannerTags(banner)
+	return matchBannerTags(banner), nil
 }
 
 // matchBannerTags 遍历 BannerRules，用前缀匹配识别服务类型
@@ -60,13 +68,16 @@ func matchBannerTags(banner string) []string {
 
 // Probe 完整指纹探测入口：先 HTTP，失败则 Banner
 // FpWorker 调用此函数，返回最终目标 URL 和识别出的标签
-func Probe(ctx context.Context, host string, port int) ProbeResult {
+func Probe(ctx context.Context, host string, port int) (ProbeResult, error) {
 	// 先尝试 HTTP/HTTPS 协议识别
 	result := ProbeHTTP(ctx, host, port)
 
 	if result.Proto == "tcp" {
 		// HTTP 失败：尝试 TCP Banner 识别
-		bannerTags := ProbeBanner(ctx, host, port)
+		bannerTags, err := ProbeBanner(ctx, host, port)
+		if err != nil {
+			return result, err
+		}
 		if len(bannerTags) > 0 {
 			result.Tags = bannerTags
 		} else {
@@ -75,6 +86,6 @@ func Probe(ctx context.Context, host string, port int) ProbeResult {
 		}
 	}
 
-	fmt.Printf("[fingerprint] %s:%d → proto=%s tags=%v\n", host, port, result.Proto, result.Tags)
-	return result
+	log.Printf("[fingerprint] %s:%d → proto=%s tags=%v\n", host, port, result.Proto, result.Tags)
+	return result, nil
 }

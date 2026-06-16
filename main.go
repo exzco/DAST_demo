@@ -7,7 +7,7 @@
 //	dast-engine poc-worker
 //	dast-engine all       
 
-package mai
+package main
 
 import (
 	"bufio"
@@ -24,40 +24,14 @@ import (
 
 	"distributed-scanner/internal/config"
 	"distributed-scanner/internal/fingerprint"
-	"distributed-scanner/internal/httpfp"
 	"distributed-scanner/internal/models"
 	"distributed-scanner/internal/poc"
 	"distributed-scanner/internal/portscan"
 	"distributed-scanner/internal/queue"
+	 log "distributed-scanner/log"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 工具函数
-// ─────────────────────────────────────────────────────────────────────────────
-
-func readLines(path string) []string {
-	f, err := os.Open(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open file failed: %v\n", err)
-		return nil
-	}
-	defer f.Close()
-	var lines []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line != "" && !strings.HasPrefix(line, "#") {
-			lines = append(lines, line)
-		}
-	}
-	if err := sc.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "[readLines] scanner error: %v\n", err)
-	}
-	return lines
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Stage-1 Dispatcher：将 IP 列表拆分为 PortJob 推入队列
-// ─────────────────────────────────────────────────────────────────────────────
 
 func runDispatcher(cfg *config.Config, args []string) {
 	fs := flag.NewFlagSet("dispatch", flag.ExitOnError)
@@ -115,29 +89,28 @@ func runDispatcher(cfg *config.Config, args []string) {
 			fmt.Fprintf(os.Stderr, "[dispatcher] push failed ip=%s: %v\n", ip, err)
 			continue
 		}
-		fmt.Printf("[dispatcher] [%d/%d] queued ip=%s\n", i+1, len(ips), ip)
+		 log.Printf("[dispatcher] [%d/%d] queued ip=%s\n", i+1, len(ips), ip)
 	}
 
-	fmt.Printf("[dispatcher] done: taskId=%s, %d IPs pushed to %s\n", *taskId, len(ips), cfg.Queue.PortJobs())
-	fmt.Printf("[dispatcher] monitor : redis-cli hgetall %s\n", cfg.Queue.StatusKey(*taskId))
-	fmt.Printf("[dispatcher] results : redis-cli lrange  %s 0 -1\n", cfg.Queue.ResultsKey(*taskId))
+	 log.Printf("[dispatcher] done: taskId=%s, %d IPs pushed to %s\n", *taskId, len(ips), cfg.Queue.PortJobs())
+	 log.Printf("[dispatcher] monitor : redis-cli hgetall %s\n", cfg.Queue.StatusKey(*taskId))
+	 log.Printf("[dispatcher] results : redis-cli lrange  %s 0 -1\n", cfg.Queue.ResultsKey(*taskId))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Stage-2 Port-Worker：端口扫描（naabu）
-// ─────────────────────────────────────────────────────────────────────────────
 
 func runPortWorker(ctx context.Context, cfg *config.Config) {
 	rdb := queue.NewClient(cfg.Redis)
+	startControlListener(ctx, rdb)
 
 	hostname, _ := os.Hostname()
-	fmt.Printf("[port-worker] started on %s, redis=%s\n", hostname, cfg.Redis.Addr)
-	fmt.Printf("[port-worker] waiting for jobs on %s ...\n", cfg.Queue.PortJobs())
+	 log.Printf("[port-worker] started on %s, redis=%s\n", hostname, cfg.Redis.Addr)
+	 log.Printf("[port-worker] waiting for jobs on %s ...\n", cfg.Queue.PortJobs())
 
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("[port-worker] shutting down")
+			 log.Println("[port-worker] shutting down")
 			return
 		default:
 		}
@@ -147,119 +120,56 @@ func runPortWorker(ctx context.Context, cfg *config.Config) {
 			if ctx.Err() != nil {
 				return
 			}
-			fmt.Printf("[port-worker] blpop error: %v\n", err)
+			 log.Printf("[port-worker] blpop error: %v\n", err)
 			continue
 		}
 
 		var job models.PortJob
 		if err := json.Unmarshal([]byte(raw), &job); err != nil {
-			fmt.Printf("[port-worker] invalid job: %v\n", err)
+			 log.Printf("[port-worker] invalid job: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("[port-worker] scanning taskId=%s ip=%s\n", job.TaskId, job.IP)
+		 log.Printf("[port-worker] scanning taskId=%s ip=%s\n", job.TaskId, job.IP)
 
 		openPorts, err := portscan.ScanIP(ctx, job.IP, job.Ports, cfg.PortScan)
 		if err != nil {
-			fmt.Printf("[port-worker] scan failed ip=%s err=%v\n", job.IP, err)
+			 log.Printf("[port-worker] scan failed ip=%s err=%v\n", job.IP, err)
 		}
 
 		for _, port := range openPorts {
-			httpJob := models.HttpJob{
+			fpJob := models.FpJob{
 				TaskId: job.TaskId,
 				Host:   job.IP,
 				Port:   port,
 			}
-			data, _ := json.Marshal(httpJob)
+			data, _ := json.Marshal(fpJob)
 			
-			rdb.Push(ctx, cfg.Queue.HttpJobs(), string(data))
+			rdb.Push(ctx, cfg.Queue.FpJobs(), string(data))
 		}
 
 		rdb.HIncrBy(ctx, cfg.Queue.StatusKey(job.TaskId), "scanned_ips", 1)
 		rdb.HIncrBy(ctx, cfg.Queue.StatusKey(job.TaskId), "open_ports", int64(len(openPorts)))
-		fmt.Printf("[port-worker] done ip=%s open=%d ports, pushed to %s\n",
-			job.IP, len(openPorts), cfg.Queue.HttpJobs())
+		 log.Printf("[port-worker] done ip=%s open=%d ports, pushed to %s\n",
+			job.IP, len(openPorts), cfg.Queue.FpJobs())
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Stage-3 HTTP-Worker：HTTP 指纹识别（httpx + wappalyzer）
-// ─────────────────────────────────────────────────────────────────────────────
 
-func runHttpWorker(ctx context.Context, cfg *config.Config) {
-	rdb := queue.NewClient(cfg.Redis)
-
-	hostname, _ := os.Hostname()
-	fmt.Printf("[http-worker] started on %s, redis=%s\n", hostname, cfg.Redis.Addr)
-	fmt.Printf("[http-worker] waiting for jobs on %s ...\n", cfg.Queue.HttpJobs())
-
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("[http-worker] shutting down")
-			return
-		default:
-		}
-
-		raw, err := rdb.BLPop(ctx, cfg.Queue.HttpJobs())
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			fmt.Printf("[http-worker] blpop error: %v\n", err)
-			continue
-		}
-
-		var job models.HttpJob
-		if err := json.Unmarshal([]byte(raw), &job); err != nil {
-			fmt.Printf("[http-worker] invalid job: %v\n", err)
-			continue
-		}
-
-		fmt.Printf("[http-worker] probing taskId=%s host=%s port=%d\n", job.TaskId, job.Host, job.Port)
-
-		result, err := httpfp.Probe(job.Host, job.Port)
-		if err != nil {
-			fmt.Printf("[http-worker] probe error host=%s:%d err=%v\n", job.Host, job.Port, err)
-			// 探测失败也推入 poc 队列（使用兜底 tags），不完全跳过
-			result = &httpfp.FpResult{
-				URL:   fmt.Sprintf("%s:%d", job.Host, job.Port),
-				Proto: "tcp",
-				Tags:  []string{"network", "exposure"},
-			}
-		}
-
-		pocJob := models.PocJob{
-			TaskId: job.TaskId,
-			Target: result.URL,
-			Proto:  result.Proto,
-			Tags:   result.Tags,
-		}
-
-		data, _ := json.Marshal(pocJob)
-		rdb.Push(ctx, cfg.Queue.PocJobs(), string(data))
-
-		rdb.HIncrBy(ctx, cfg.Queue.StatusKey(job.TaskId), "http_done", 1)
-		fmt.Printf("[http-worker] done host=%s:%d → url=%s tags=%v\n",
-			job.Host, job.Port, result.URL, result.Tags)
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Stage-3b FP-Worker：TCP/协议指纹识别（fingerprintx）
-// ─────────────────────────────────────────────────────────────────────────────
 
 func runFpWorker(ctx context.Context, cfg *config.Config) {
 	rdb := queue.NewClient(cfg.Redis)
+	startControlListener(ctx, rdb)
 
 	hostname, _ := os.Hostname()
-	fmt.Printf("[fp-worker] started on %s, redis=%s\n", hostname, cfg.Redis.Addr)
-	fmt.Printf("[fp-worker] waiting for jobs on %s ...\n", cfg.Queue.FpJobs())
+	 log.Printf("[fp-worker] started on %s, redis=%s\n", hostname, cfg.Redis.Addr)
+	 log.Printf("[fp-worker] waiting for jobs on %s ...\n", cfg.Queue.FpJobs())
 
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("[fp-worker] shutting down")
+			 log.Println("[fp-worker] shutting down")
 			return
 		default:
 		}
@@ -269,52 +179,74 @@ func runFpWorker(ctx context.Context, cfg *config.Config) {
 			if ctx.Err() != nil {
 				return
 			}
-			fmt.Printf("[fp-worker] blpop error: %v\n", err)
+			 log.Printf("[fp-worker] blpop error: %v\n", err)
 			continue
 		}
 
 		var job models.FpJob
 		if err := json.Unmarshal([]byte(raw), &job); err != nil {
-			fmt.Printf("[fp-worker] invalid job: %v\n", err)
+			 log.Printf("[fp-worker] invalid job: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("[fp-worker] probing taskId=%s host=%s port=%d\n", job.TaskId, job.Host, job.Port)
+		if isTaskCancelled(job.TaskId) {
+			 log.Printf("[fp-worker] skipped job for cancelled taskId=%s\n", job.TaskId)
+			continue
+		}
 
-		result := fingerprint.Probe(ctx, job.Host, job.Port)
+		 log.Printf("[fp-worker] probing taskId=%s host=%s port=%d\n", job.TaskId, job.Host, job.Port)
+
+		result, err := fingerprint.Probe(ctx, job.Host, job.Port)
+		if err != nil {
+			// Timeout/network error, trigger retry
+			if job.Retry < 3 {
+				job.Retry++
+				data, _ := json.Marshal(job)
+				rdb.Push(ctx, cfg.Queue.FpJobs(), string(data))
+				 log.Printf("[fp-worker] network error on %s:%d, retrying (%d/3): %v\n", job.Host, job.Port, job.Retry, err)
+				continue
+			}
+			 log.Printf("[fp-worker] network error on %s:%d, max retries reached: %v. falling back to default tags.\n", job.Host, job.Port, err)
+			// Max retries reached, fallback
+			result = fingerprint.ProbeResult{
+				URL:   fmt.Sprintf("%s:%d", job.Host, job.Port),
+				Proto: "tcp",
+				Tags:  fingerprint.FallbackTags,
+			}
+		}
 
 		pocJob := models.PocJob{
 			TaskId: job.TaskId,
 			Target: result.URL,
 			Proto:  result.Proto,
 			Tags:   result.Tags,
+			Retry:  0,
 		}
 
 		data, _ := json.Marshal(pocJob)
 		rdb.Push(ctx, cfg.Queue.PocJobs(), string(data))
 
 		rdb.HIncrBy(ctx, cfg.Queue.StatusKey(job.TaskId), "fp_done", 1)
-		fmt.Printf("[fp-worker] done host=%s:%d → target=%s tags=%v\n",
+		 log.Printf("[fp-worker] done host=%s:%d → target=%s tags=%v\n",
 			job.Host, job.Port, result.URL, result.Tags)
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Stage-4 POC-Worker：nuclei 漏洞扫描（按 tags 动态过滤模板）
-// ─────────────────────────────────────────────────────────────────────────────
 
 func runPocWorker(ctx context.Context, cfg *config.Config) {
 	rdb := queue.NewClient(cfg.Redis)
+	startControlListener(ctx, rdb)
 
 	hostname, _ := os.Hostname()
-	fmt.Printf("[poc-worker] started on %s, redis=%s poc=%s\n",
+	 log.Printf("[poc-worker] started on %s, redis=%s poc=%s\n",
 		hostname, cfg.Redis.Addr, cfg.Scan.PocDir)
-	fmt.Printf("[poc-worker] waiting for jobs on %s ...\n", cfg.Queue.PocJobs())
+	 log.Printf("[poc-worker] waiting for jobs on %s ...\n", cfg.Queue.PocJobs())
 
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("[poc-worker] shutting down")
+			 log.Println("[poc-worker] shutting down")
 			return
 		default:
 		}
@@ -324,28 +256,44 @@ func runPocWorker(ctx context.Context, cfg *config.Config) {
 			if ctx.Err() != nil {
 				return
 			}
-			fmt.Printf("[poc-worker] blpop error: %v\n", err)
+			 log.Printf("[poc-worker] blpop error: %v\n", err)
 			continue
 		}
 
 		var job models.PocJob
 		if err := json.Unmarshal([]byte(raw), &job); err != nil {
-			fmt.Printf("[poc-worker] invalid job: %v\n", err)
+			 log.Printf("[poc-worker] invalid job: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("[poc-worker] scanning taskId=%s target=%s tags=%v\n",
+		if isTaskCancelled(job.TaskId) {
+			 log.Printf("[poc-worker] skipped job for cancelled taskId=%s\n", job.TaskId)
+			continue
+		}
+
+		 log.Printf("[poc-worker] scanning taskId=%s target=%s tags=%v\n",
 			job.TaskId, job.Target, job.Tags)
 
 		findings, err := poc.ScanWithTags(ctx, job.Target, job.Tags, cfg.Scan.PocDir)
 		if err != nil {
-			fmt.Printf("[poc-worker] error target=%s: %v\n", job.Target, err)
+			// If scan failed due to timeout, trigger retry
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "deadline") {
+				if job.Retry < 3 {
+					job.Retry++
+					data, _ := json.Marshal(job)
+					rdb.Push(ctx, cfg.Queue.PocJobs(), string(data))
+					 log.Printf("[poc-worker] timeout error on target %s, retrying (%d/3): %v\n", job.Target, job.Retry, err)
+					continue
+				}
+			}
+			 log.Printf("[poc-worker] scan failed on target %s, max retries reached: %v\n", job.Target, err)
 		}
 
 		for _, f := range findings {
 			b, _ := json.Marshal(f)
 			rdb.Push(ctx, cfg.Queue.ResultsKey(job.TaskId), string(b))
-			fmt.Printf("[poc-worker] FINDING taskId=%s target=%s id=%s severity=%s\n",
+			 log.Printf("[poc-worker] FINDING taskId=%s target=%s id=%s severity=%s\n",
 				job.TaskId, f.Host, f.TemplateID, f.Info.SeverityHolder.Severity)
 		}
 
@@ -354,9 +302,7 @@ func runPocWorker(ctx context.Context, cfg *config.Config) {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // all：本地联调模式，同时启动所有 worker
-// ─────────────────────────────────────────────────────────────────────────────
 
 func runAll(cfg *config.Config, args []string) {
 	fs := flag.NewFlagSet("all", flag.ExitOnError)
@@ -381,32 +327,29 @@ func runAll(cfg *config.Config, args []string) {
 			idx := i + 1
 			go func() {
 				defer wg.Done()
-				fmt.Printf("[all] starting %s #%d\n", name, idx)
+				 log.Printf("[all] starting %s #%d\n", name, idx)
 				fn(ctx, cfg)
 			}()
 		}
 	}
 
 	start("port-worker", *portN, runPortWorker)
-	start("http-worker", *httpN, runHttpWorker)
+	// start("http-worker", *httpN, runHttpWorker)
 	start("fp-worker", *fpN, runFpWorker)
 	start("poc-worker", *pocN, runPocWorker)
 
-	fmt.Printf("[all] pipeline started: port×%d + http×%d + fp×%d + poc×%d\n",
+	 log.Printf("[all] pipeline started: port×%d + http×%d + fp×%d + poc×%d\n",
 		*portN, *httpN, *fpN, *pocN)
-	fmt.Println("[all] press Ctrl+C to stop all workers")
+	 log.Println("[all] press Ctrl+C to stop all workers")
 
 	wg.Wait()
-	fmt.Println("[all] all workers stopped")
+	 log.Println("[all] all workers stopped")
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // 主入口
-// ─────────────────────────────────────────────────────────────────────────────
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `dast-engine — 分布式 DAST 扫描引擎
-
+	fmt.Fprintf(os.Stderr, `
 用法:
   dast-engine <subcommand> [flags]
 
@@ -418,13 +361,11 @@ func usage() {
                -ports <r>   端口范围: top1000 / full / 80,443（默认由 DEFAULT_PORTS 控制）
 
   port-worker  端口扫描 Worker（Stage-2, naabu）
-  http-worker  HTTP 指纹识别 Worker（Stage-3, httpx + wappalyzer）
   fp-worker    TCP/协议指纹 Worker（Stage-3b, fingerprintx）
   poc-worker   POC 漏洞扫描 Worker（Stage-4, nuclei）
 
   all          一键启动所有 worker（本地联调模式）
                -port-workers N   （默认 2）
-               -http-workers N   （默认 2）
                -fp-workers   N   （默认 1）
                -poc-workers  N   （默认 1）
 
@@ -466,8 +407,21 @@ func main() {
 	// 全局唯一一次配置加载，所有子命令共享同一份配置
 	cfg := config.Load()
 
+	// 初始化日志包控制台输出开关
+	 log.SetConsolePrint(cfg.ConsoleLog)
+
 	subCmd := os.Args[1]
 	rest := os.Args[2:]
+
+	// 加载指纹规则（仅针对需要指纹识别的子命令）
+	if subCmd == "port-worker" || subCmd == "fp-worker" || subCmd == "all" {
+		if err := fingerprint.LoadRules(cfg.Scan.FpRulesFile); err != nil {
+			fmt.Fprintf(os.Stderr, "错误：加载指纹规则失败: %v\n", err)
+			os.Exit(1)
+		}
+		 log.Printf("[fingerprint] 成功加载指纹规则 (%d 条 HTTP 规则, %d 条 TCP 规则)\n", 
+			len(fingerprint.HTTPRules), len(fingerprint.BannerRules))
+	}
 
 	switch subCmd {
 	case "dispatch":
@@ -477,11 +431,6 @@ func main() {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 		runPortWorker(ctx, cfg)
-
-	case "http-worker":
-		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer cancel()
-		runHttpWorker(ctx, cfg)
 
 	case "fp-worker":
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -508,4 +457,64 @@ func main() {
 		usage()
 		os.Exit(1)
 	}
+}
+
+func readLines(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open file failed: %v\n", err)
+		return nil
+	}
+	defer f.Close()
+	var lines []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" && !strings.HasPrefix(line, "#") {
+			lines = append(lines, line)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[readLines] scanner error: %v\n", err)
+	}
+	return lines
+}
+
+var (
+	cancelledTasks   = make(map[string]bool)
+	cancelledTasksMu sync.RWMutex
+)
+
+func isTaskCancelled(taskId string) bool {
+	cancelledTasksMu.RLock()
+	defer cancelledTasksMu.RUnlock()
+	return cancelledTasks[taskId]
+}
+
+func cancelTask(taskId string) {
+	cancelledTasksMu.Lock()
+	defer cancelledTasksMu.Unlock()
+	cancelledTasks[taskId] = true
+}
+
+func startControlListener(ctx context.Context, rdb *queue.Client) {
+	pubsub := rdb.Subscribe(ctx, "scan:control")
+	go func() {
+		defer pubsub.Close()
+		ch := pubsub.Channel()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				taskId := strings.TrimSpace(msg.Payload)
+				if taskId != "" {
+					cancelTask(taskId)
+					 log.Printf("[control] Task %s cancellation received via Pub/Sub. Skipping future jobs for this task.\n", taskId)
+				}
+			}
+		}
+	}()
 }
