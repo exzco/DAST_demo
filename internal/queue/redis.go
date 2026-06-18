@@ -1,5 +1,4 @@
 // Package queue 封装 Redis 队列操作
-// 所有节点（Dispatcher / Worker）通过此包与中心 Redis 通信
 package queue
 
 import (
@@ -49,32 +48,30 @@ func (c *Client) BLPop(ctx context.Context, key string) (string, error) {
 	return res[1], nil
 }
 
-// HSet 更新 Hash 中的字段（用于记录进度 scan:status:{taskId}）
 func (c *Client) HSet(ctx context.Context, key string, values ...interface{}) error {
 	return c.rdb.HSet(ctx, key, values...).Err()
 }
 
-// HIncrBy 自增 Hash 字段（用于统计各阶段完成数量）
 func (c *Client) HIncrBy(ctx context.Context, key, field string, incr int64) error {
 	return c.rdb.HIncrBy(ctx, key, field, incr).Err()
 }
 
-// Subscribe 订阅控制频道（用于接收取消/暂停命令）
 func (c *Client) Subscribe(ctx context.Context, channel string) *redis.PubSub {
 	return c.rdb.Subscribe(ctx, channel)
 }
 
-// Close 关闭 Redis 连接
 func (c *Client) Close() error {
 	return c.rdb.Close()
 }
 
-// Ping 检查连通性，用于健康检查
+func (c *Client) Del(ctx context.Context, keys ...string) error {
+	return c.rdb.Del(ctx, keys...).Err()
+}
+
 func (c *Client) Ping(ctx context.Context) error {
 	return c.rdb.Ping(ctx).Err()
 }
 
-// ReadTimeout 对外暴露，供 BLPop 等超时判断
 func (c *Client) ReadTimeout() time.Duration {
 	return c.rdb.Options().ReadTimeout
 }

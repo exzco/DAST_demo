@@ -63,7 +63,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME="${BINARY_NAME}.exe"
           fi
-          # -ldflags="-s -w" 用于压缩体积，移除调试信息
+          # -ldflags="-s -w" 
           go build -v -ldflags="-s -w" -o ./dist/$BINARY_NAME ./...
 
       - name: Generate Assets for Release

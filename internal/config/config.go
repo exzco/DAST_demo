@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	 log "distributed-scanner/log"
+	log "distributed-scanner/log"
 )
 
 // Config 是整个引擎的运行时配置，由环境变量填充，启动时加载一次后只读使用。
@@ -25,9 +25,9 @@ type Config struct {
 }
 
 type RedisConfig struct {
-	Addr string
-	Password string
-	DB int
+	Addr        string
+	Password    string
+	DB          int
 	DialTimeout time.Duration
 	ReadTimeout time.Duration
 }
@@ -35,15 +35,14 @@ type RedisConfig struct {
 type ScanConfig struct {
 	// POC_DIR: nuclei 模板目录路径
 	// 默认：./poc（仅本地开发）
-	PocDir string
+	PocDir       string
 	DefaultPorts string
-	FpRulesFile string // 指纹规则 JSON 文件路径
+	FpRulesFile  string // 指纹规则 JSON 文件路径
 }
 
 type QueueKeys struct {
 	Prefix string
 }
-
 
 func (q QueueKeys) PortJobs() string { return q.Prefix + ":port:jobs" }
 
@@ -79,7 +78,7 @@ func Load() *Config {
 	cfg := &Config{
 		Redis: RedisConfig{
 			Addr:        mustEnv("REDIS_ADDR", "127.0.0.1:6379"),
-			Password:    getEnv("REDIS_PASSWORD"), 
+			Password:    getEnv("REDIS_PASSWORD"),
 			DB:          envInt("REDIS_DB", 0),
 			DialTimeout: envDuration("REDIS_DIAL_TIMEOUT", 5) * time.Second,
 			ReadTimeout: envDuration("REDIS_READ_TIMEOUT", 60) * time.Second,
@@ -108,20 +107,20 @@ func (c *Config) Print() {
 	if c.Redis.Password != "" {
 		redacted = "***（已设置）"
 	}
-	 log.Printf("[config] Redis.Addr        = %s\n", c.Redis.Addr)
-	 log.Printf("[config] Redis.Password    = %s\n", redacted)
-	 log.Printf("[config] Redis.DB          = %d\n", c.Redis.DB)
-	 log.Printf("[config] Redis.DialTimeout = %s\n", c.Redis.DialTimeout)
-	 log.Printf("[config] Redis.ReadTimeout = %s\n", c.Redis.ReadTimeout)
-	 log.Printf("[config] Scan.PocDir       = %s\n", c.Scan.PocDir)
-	 log.Printf("[config] Scan.DefaultPorts = %s\n", c.Scan.DefaultPorts)
-	 log.Printf("[config] Scan.FpRulesFile  = %s\n", c.Scan.FpRulesFile)
-	 log.Printf("[config] Queue.Prefix      = %s\n", c.Queue.Prefix)
-	 log.Printf("[config] PortScan.Rate     = %d pps\n", c.PortScan.Rate)
-	 log.Printf("[config] PortScan.Timeout  = %s\n", c.PortScan.Timeout)
-	 log.Printf("[config] PortScan.Threads  = %d\n", c.PortScan.Threads)
-	 log.Printf("[config] PortScan.ScanType = %s\n", c.PortScan.ScanType)
-	 log.Printf("[config] ConsoleLog        = %t\n", c.ConsoleLog)
+	log.Printf("[config] Redis.Addr        = %s\n", c.Redis.Addr)
+	log.Printf("[config] Redis.Password    = %s\n", redacted)
+	log.Printf("[config] Redis.DB          = %d\n", c.Redis.DB)
+	log.Printf("[config] Redis.DialTimeout = %s\n", c.Redis.DialTimeout)
+	log.Printf("[config] Redis.ReadTimeout = %s\n", c.Redis.ReadTimeout)
+	log.Printf("[config] Scan.PocDir       = %s\n", c.Scan.PocDir)
+	log.Printf("[config] Scan.DefaultPorts = %s\n", c.Scan.DefaultPorts)
+	log.Printf("[config] Scan.FpRulesFile  = %s\n", c.Scan.FpRulesFile)
+	log.Printf("[config] Queue.Prefix      = %s\n", c.Queue.Prefix)
+	log.Printf("[config] PortScan.Rate     = %d pps\n", c.PortScan.Rate)
+	log.Printf("[config] PortScan.Timeout  = %s\n", c.PortScan.Timeout)
+	log.Printf("[config] PortScan.Threads  = %d\n", c.PortScan.Threads)
+	log.Printf("[config] PortScan.ScanType = %s\n", c.PortScan.ScanType)
+	log.Printf("[config] ConsoleLog        = %t\n", c.ConsoleLog)
 }
 
 var envMap map[string]string

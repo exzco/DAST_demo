@@ -1,0 +1,9 @@
+.env
+log_*.json
+1.md
+*.exe
+scan
+poc/
+testenv/
+data/
+result/
